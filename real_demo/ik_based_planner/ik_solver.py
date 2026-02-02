@@ -1,17 +1,16 @@
 import numpy as np
-import os
 import mujoco
-from collision_free_ik.mink.lie import SE3, SO3
-from collision_free_ik.mink.configuration import Configuration
-from collision_free_ik.mink.limits.configuration_limit import ConfigurationLimit
-from collision_free_ik.mink.solve_ik import solve_ik
-from collision_free_ik.mink.tasks.frame_task import FrameTask
+from mink.lie import SE3, SO3
+from mink.configuration import Configuration
+from mink.limits.configuration_limit import ConfigurationLimit
+from mink.solve_ik import solve_ik
+from mink.tasks.frame_task import FrameTask
 
 
 class InverseKinematicsSolver:
     def __init__(self, model, joint_positions=None, tcp="tcp"):
         # Load MuJoCo model and data
-        self.model = model 
+        self.model = model
         self.data = mujoco.MjData(self.model)
 
         # Set initial joint configuration

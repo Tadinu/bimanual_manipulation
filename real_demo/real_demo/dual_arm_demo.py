@@ -1,25 +1,17 @@
-import rclpy
-from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy
-from ament_index_python.packages import get_package_share_directory
-
 import os
 import time
-import json
-import csv
-import numpy as np
 
-import mujoco
+import mujoco as mj
 from mujoco import viewer
 
-from sampling_based_planner.mpc_planner import run_cem_planner
-from sampling_based_planner.quat_math import *
+import sys
 
-from rtde_control import RTDEControlInterface as RTDEControl
-from rtde_receive import RTDEReceiveInterface as RTDEReceive
+PROJECT_ROOT = os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
+sys.path.insert(0, PROJECT_ROOT)
+from real_demo.sampling_based_planner.cem_planner import CemPlanner
+from real_demo.sampling_based_planner.quat_math import *
 
-PACKAGE_DIR = get_package_share_directory('real_demo')
+PACKAGE_DIR = '/media/ducthan/376b23a1-5a02-4960-b3ca-24b2fcef8f891/11_MPC/bimanual_manipulation/real_demo'
 np.set_printoptions(precision=4, suppress=True)
 
 target_positions = np.array([
@@ -35,46 +27,29 @@ target_rotations = np.array([
     np.array([1, 0, 0, 0])
 ])
 
-class Planner(Node):
+
+class Planner:
     def __init__(self):
-        super().__init__('planner')
-
-        # Declare all parameters
-        self.declare_parameter('use_hardware', False)
-        self.declare_parameter('record_data', True)
-        self.declare_parameter('idx', 0)
-        self.declare_parameter('num_batch', 500)
-        self.declare_parameter('num_steps', 15)
-        self.declare_parameter('maxiter_cem', 1)
-        self.declare_parameter('maxiter_projection', 5)
-        self.declare_parameter('w_pos', 3.0)
-        self.declare_parameter('w_rot', 0.5)
-        self.declare_parameter('w_col', 500.0)
-        self.declare_parameter('num_elite', 0.05)
-        self.declare_parameter('timestep', 0.1)
-        self.declare_parameter('position_threshold', 0.06)
-        self.declare_parameter('rotation_threshold', 0.1)
-
         # Demo params
-        self.use_hardware = self.get_parameter('use_hardware').get_parameter_value().bool_value
-        self.record_data_ = self.get_parameter('record_data').get_parameter_value().bool_value
-        self.idx = self.get_parameter('idx').get_parameter_value().integer_value
+        self.use_hardware = False
+        self.record_data_ = False
+        self.idx = 0
         self.idx = str(self.idx).zfill(2)
 
         # Planner params
         self.num_dof = 12
         self.init_joint_position = np.array([1.5, -1.8, 1.75, -1.25, -1.6, 0, -1.5, -1.8, 1.75, -1.25, -1.6, 0])
-        num_batch = self.get_parameter('num_batch').get_parameter_value().integer_value
-        num_steps = self.get_parameter('num_steps').get_parameter_value().integer_value
-        maxiter_cem = self.get_parameter('maxiter_cem').get_parameter_value().integer_value
-        maxiter_projection = self.get_parameter('maxiter_projection').get_parameter_value().integer_value
-        w_pos = self.get_parameter('w_pos').get_parameter_value().double_value
-        w_rot = self.get_parameter('w_rot').get_parameter_value().double_value
-        w_col = self.get_parameter('w_col').get_parameter_value().double_value
-        num_elite = self.get_parameter('num_elite').get_parameter_value().double_value
-        self.timestep = self.get_parameter('timestep').get_parameter_value().double_value
-        position_threshold = self.get_parameter('position_threshold').get_parameter_value().double_value
-        rotation_threshold = self.get_parameter('rotation_threshold').get_parameter_value().double_value
+        num_batch = 500
+        num_steps = 15
+        maxiter_cem = 1
+        maxiter_projection = 5
+        # w_pos= 3.0
+        # w_rot= 0.5
+        # w_col= 500.0
+        num_elite = 0.05
+        self.timestep = 0.1
+        position_threshold = 0.06
+        rotation_threshold = 0.1
 
         self.num_targets = 21
 
@@ -82,16 +57,17 @@ class Planner(Node):
             self.pathes = {
                 "setup": os.path.join(PACKAGE_DIR, 'data', 'planner', 'setup', f'setup_{self.idx}.npz'),
                 "trajectory": os.path.join(PACKAGE_DIR, 'data', 'planner', 'trajectory', f'traj_{self.idx}.npz'),
-                "benchmark": os.path.join(PACKAGE_DIR, 'data', 'planner', 'benchmark', f'bench_{num_batch}_{num_steps}_19{self.idx}.npz'),
+                "benchmark": os.path.join(PACKAGE_DIR, 'data', 'planner', 'benchmark',
+                                          f'bench_{num_batch}_{num_steps}_19{self.idx}.npz'),
             }
             self.data_buffers = {
                 'batch_size': [num_batch],
                 'horizon': [num_steps],
 
-                'target_0': [0]*self.num_targets,
-                'total_time_s': [0]*self.num_targets,
-                'success': [0]*self.num_targets,
-                'reason': [0]*self.num_targets,
+                'target_0': [0] * self.num_targets,
+                'total_time_s': [0] * self.num_targets,
+                'success': [0] * self.num_targets,
+                'reason': [0] * self.num_targets,
 
                 'step_time_ms': [[] for _ in range(self.num_targets)],
                 'theta': [[] for _ in range(self.num_targets)],
@@ -103,13 +79,13 @@ class Planner(Node):
                 'cost_dist': [[] for _ in range(self.num_targets)],
                 'cost_zy': [[] for _ in range(self.num_targets)],
             }
-            
+
         self.task = 'pick'
 
         cost_weights = {
             'collision': 500,
-			'theta': 0.3,
-			'z-axis': 5.0,
+            'theta': 0.3,
+            'z-axis': 5.0,
             'velocity': 0.1,
 
             'position': 3.0,
@@ -128,13 +104,6 @@ class Planner(Node):
         self.grab_rot_thresh = 0.05
         self.thetadot = np.zeros(self.num_dof)
 
-        # Initialize robot connection
-        self.rtde_c_0 = None
-        self.rtde_r_0 = None
-
-        self.rtde_c_1 = None
-        self.rtde_r_1 = None
-
         self.grippers = {
             '0': {
                 'srv': None,
@@ -146,39 +115,45 @@ class Planner(Node):
             }
         }
 
-        if self.use_hardware:
-            self.initialize_robot_connection()
-        
         # Initialize MuJoCo model and data
-        model_path = os.path.join(get_package_share_directory('real_demo'), 'ur5e_hande_mjx', 'scene.xml')
-        self.model = mujoco.MjModel.from_xml_path(model_path)
+        model_path = f'{PACKAGE_DIR}/ur5e_hande_mjx/scene.xml'
+        self.model: mj.MjModel = mj.MjModel.from_xml_path(model_path)
         self.model.opt.timestep = self.timestep
 
-        self.data = mujoco.MjData(self.model)
-  
+        self.data = mj.MjData(self.model)
+
         joint_names_pos = list()
         joint_names_vel = list()
         for i in range(self.model.njnt):
             joint_type = self.model.jnt_type[i]
-            n_pos = 7 if joint_type == mujoco.mjtJoint.mjJNT_FREE else 4 if joint_type == mujoco.mjtJoint.mjJNT_BALL else 1
-            n_vel = 6 if joint_type == mujoco.mjtJoint.mjJNT_FREE else 3 if joint_type == mujoco.mjtJoint.mjJNT_BALL else 1
-            
+            n_pos = 7 if joint_type == mj.mjtJoint.mjJNT_FREE else 4 if joint_type == mj.mjtJoint.mjJNT_BALL else 1
+            n_vel = 6 if joint_type == mj.mjtJoint.mjJNT_FREE else 3 if joint_type == mj.mjtJoint.mjJNT_BALL else 1
+
             for _ in range(n_pos):
-                joint_names_pos.append(mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, i))
+                joint_names_pos.append(mj.mj_id2name(self.model, mj.mjtObj.mjOBJ_JOINT, i))
             for _ in range(n_vel):
-                joint_names_vel.append(mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, i))
-        
-        
-        robot_joints = np.array(['shoulder_pan_joint_1', 'shoulder_lift_joint_1', 'elbow_joint_1', 'wrist_1_joint_1', 'wrist_2_joint_1', 'wrist_3_joint_1',
-                                'shoulder_pan_joint_2', 'shoulder_lift_joint_2', 'elbow_joint_2', 'wrist_1_joint_2', 'wrist_2_joint_2', 'wrist_3_joint_2'])
-        
+                joint_names_vel.append(mj.mj_id2name(self.model, mj.mjtObj.mjOBJ_JOINT, i))
+
+        robot_joints = np.array(
+            ['shoulder_pan_joint_1', 'shoulder_lift_joint_1', 'elbow_joint_1', 'wrist_1_joint_1', 'wrist_2_joint_1',
+             'wrist_3_joint_1',
+             'shoulder_pan_joint_2', 'shoulder_lift_joint_2', 'elbow_joint_2', 'wrist_1_joint_2', 'wrist_2_joint_2',
+             'wrist_3_joint_2'])
+
         self.joint_mask_pos = np.isin(joint_names_pos, robot_joints)
         self.joint_mask_vel = np.isin(joint_names_vel, robot_joints)
 
         self.data.qpos[self.joint_mask_pos] = self.init_joint_position
 
-        target_0_rot = quaternion_multiply(quaternion_multiply(self.model.body(name="target_0").quat, rotation_quaternion(-180, [0, 1, 0])), rotation_quaternion(-90, [0, 0, 1]))
-        target_1_rot = quaternion_multiply(quaternion_multiply(self.model.body(name="target_1").quat, rotation_quaternion(180, [0, 1, 0])), rotation_quaternion(90, [0, 0, 1]))
+        self.gripper_0_act_idx = self.model.actuator('fingers_actuator_0').id
+        self.gripper_1_act_idx = self.model.actuator('fingers_actuator_1').id
+
+        target_0_rot = quaternion_multiply(
+            quaternion_multiply(self.model.body(name="target_0").quat, rotation_quaternion(-180, [0, 1, 0])),
+            rotation_quaternion(-90, [0, 0, 1]))
+        target_1_rot = quaternion_multiply(
+            quaternion_multiply(self.model.body(name="target_1").quat, rotation_quaternion(180, [0, 1, 0])),
+            rotation_quaternion(90, [0, 0, 1]))
         # target_2_rot = quaternion_multiply(self.data.mocap_quat[self.model.body_mocapid[self.model.body(name='tray_mocap_target').id]], rotation_quaternion(-45, [0, 0, 1]))
 
         self.model.body(name='target_0').quat = target_0_rot
@@ -224,18 +199,19 @@ class Planner(Node):
         #     table_0_pos = self.model.body(name='table_0').pos
         #     table_1_pos = self.model.body(name='table_1').pos
 
-        mujoco.mj_forward(self.model, self.data)
+        mj.mj_forward(self.model, self.data)
 
-        self.tray_init_pos = np.concatenate([self.data.mocap_pos[self.model.body_mocapid[self.model.body(name='tray_mocap').id]],
-                                            self.data.mocap_quat[self.model.body_mocapid[self.model.body(name='tray_mocap').id]]])
-        
+        self.tray_init_pos = np.concatenate(
+            [self.data.mocap_pos[self.model.body_mocapid[self.model.body(name='tray_mocap').id]],
+             self.data.mocap_quat[self.model.body_mocapid[self.model.body(name='tray_mocap').id]]])
+
         self.success = 0
         self.reason = 'na'
         self.traj_time_start = time.time()
         self.target_idx = 0
 
         # Initialize CEM/MPC planner
-        self.planner = run_cem_planner(
+        self.planner = CemPlanner(
             model=self.model,
             data=self.data,
             num_dof=self.num_dof,
@@ -251,25 +227,17 @@ class Planner(Node):
             table_1_pos=table_1_pos,
             cost_weights=cost_weights
         )
-        
+
         # Setup viewer
-        self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
-        self.viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = True
+        self.viewer = mj.viewer.launch_passive(self.model, self.data)
+        self.viewer.opt.flags[mj.mjtVisFlag.mjVIS_CONTACTPOINT] = True
         self.viewer.cam.lookat[:] = self.model.body(name='table_0').pos
-        self.viewer.cam.distance = 5.0 
-        self.viewer.cam.azimuth = 90.0 
+        self.viewer.cam.distance = 5.0
+        self.viewer.cam.azimuth = 90.0
         self.viewer.cam.elevation = -30.0
-        
+
         # self.viewer.cam.frame_size = 0.03  # default is usually 0.1 
 
-        # Setup subscribers
-        qos_profile = QoSProfile(reliability=QoSReliabilityPolicy.BEST_EFFORT, depth=1)
-        self.subscription_object0 = self.create_subscription(PoseStamped, '/vrpn_mocap/object1/pose', self.object0_callback, qos_profile)
-        self.subscription_obstacle0 = self.create_subscription(PoseStamped, '/vrpn_mocap/obstacle1/pose', self.obstacle0_callback, qos_profile)
-        
-        # Start control timer
-        self.timer = self.create_timer(self.timestep, self.control_loop)
-    
     def render_trace(self, viewer_, *eef_trace_positions):
 
         """Render the end-effector trajectory trace in the viewer."""
@@ -281,15 +249,15 @@ class Planner(Node):
                 # Create a new geom in the user scene
                 geom_id = viewer_.user_scn.ngeom
                 viewer_.user_scn.ngeom += 1
-    
+
                 # Initialize the geom properties
-                mujoco.mjv_initGeom(
+                mj.mjv_initGeom(
                     viewer_.user_scn.geoms[geom_id],
-                    type=mujoco.mjtGeom.mjGEOM_SPHERE,
+                    type=mj.mjtGeom.mjGEOM_SPHERE,
                     size=[0.01, 0.01, 0.01],  # radius 1 cm sphere
                     pos=pos,
                     mat=np.eye(3).flatten(),
-                    rgba=[0, 0, 1, 0.5]  
+                    rgba=[0, 0, 1, 0.5]
                 )
 
     def control_loop(self):
@@ -300,7 +268,7 @@ class Planner(Node):
             eef_pos_0 = self.data.site_xpos[self.planner.tcp_id_0]
             eef_pos_1 = self.data.site_xpos[self.planner.tcp_id_1]
 
-            tray_pos = (eef_pos_0+eef_pos_1)/2 - np.array([0, 0, 0.1])
+            tray_pos = (eef_pos_0 + eef_pos_1) / 2 - np.array([0, 0, 0.1])
             self.data.mocap_pos[self.model.body_mocapid[self.model.body(name='tray_mocap').id]] = tray_pos
 
             tray_rot_init = self.data.mocap_quat[self.model.body_mocapid[self.model.body(name='tray_mocap').id]]
@@ -309,8 +277,10 @@ class Planner(Node):
             tray_rot = turn_quat(tray_0_pos, tray_1_pos, eef_pos_0, eef_pos_1, tray_rot_init)
             self.data.mocap_quat[self.model.body_mocapid[self.model.body(name='tray_mocap').id]] = tray_rot
 
-            self.planner.update_targets(target_idx=0, target_pos=self.data.xpos[self.model.body(name="target_00").id], target_rot=self.data.xquat[self.model.body(name="target_00").id])
-            self.planner.update_targets(target_idx=1, target_pos=self.data.xpos[self.model.body(name="target_11").id], target_rot=self.data.xquat[self.model.body(name="target_11").id])
+            self.planner.update_targets(target_idx=0, target_pos=self.data.xpos[self.model.body(name="target_00").id],
+                                        target_rot=self.data.xquat[self.model.body(name="target_00").id])
+            self.planner.update_targets(target_idx=1, target_pos=self.data.xpos[self.model.body(name="target_11").id],
+                                        target_rot=self.data.xquat[self.model.body(name="target_11").id])
 
         # Get current state
         if self.use_hardware:
@@ -322,31 +292,21 @@ class Planner(Node):
         else:
             current_pos = self.data.qpos[self.joint_mask_pos]
             current_vel = self.thetadot
-        
-        
+
         # Compute control
-        self.thetadot, cost, cost_list, thetadot_horizon, theta_horizon, eef_0_planned, eef_1_planned = self.planner.compute_control(current_pos, current_vel, self.task)
+        self.thetadot, cost, cost_list, thetadot_horizon, theta_horizon, eef_0_planned, eef_1_planned = (
+            self.planner.compute_control(current_pos, current_vel, self.task))
         cost_c, cost_dist, cost_g, cost_r = cost_list
 
-        if self.use_hardware:
-            # Send velocity command
-            self.rtde_c_0.speedJ(self.thetadot[:self.planner.num_dof//2], acceleration=1, time=0.1)
-            self.rtde_c_1.speedJ(self.thetadot[self.planner.num_dof//2:], acceleration=1, time=0.1)
+        self.data.qvel[:] = np.zeros(len(self.joint_mask_vel))
+        self.data.qvel[self.joint_mask_vel] = self.thetadot
+        mj.mj_step(self.model, self.data)
 
-            # Update MuJoCo state
-            current_pos = np.concatenate((np.array(self.rtde_r_0.getActualQ()), np.array(self.rtde_r_1.getActualQ())), axis=None)
-            self.data.qpos[self.joint_mask_pos] = current_pos
-            mujoco.mj_forward(self.model, self.data)
-        else:
-            self.data.qvel[:] = np.zeros(len(self.joint_mask_vel))
-            self.data.qvel[self.joint_mask_vel] = self.thetadot
-            mujoco.mj_step(self.model, self.data)
-        
-        self.render_trace(self.viewer, eef_0_planned[:,:3], eef_1_planned[:,:3])
+        self.render_trace(self.viewer, eef_0_planned[:, :3], eef_1_planned[:, :3])
 
         current_cost_g_0 = np.linalg.norm(self.data.site_xpos[self.planner.tcp_id_0] - self.planner.target_0[:3])
         current_cost_r_0 = quaternion_distance(self.data.xquat[self.planner.hande_id_0], self.planner.target_0[3:])
-            
+
         current_cost_g_1 = np.linalg.norm(self.data.site_xpos[self.planner.tcp_id_1] - self.planner.target_1[:3])
         current_cost_r_1 = quaternion_distance(self.data.xquat[self.planner.hande_id_1], self.planner.target_1[3:])
 
@@ -355,51 +315,57 @@ class Planner(Node):
         current_cost_g_tray = np.linalg.norm(tray_pos - self.planner.target_2[:3])
         current_cost_r_tray = quaternion_distance(tray_rot, self.planner.target_2[3:])
 
-        distance = np.linalg.norm(self.data.site_xpos[self.planner.tcp_id_0] - self.data.site_xpos[self.planner.tcp_id_1])
+        distance = np.linalg.norm(
+            self.data.site_xpos[self.planner.tcp_id_0] - self.data.site_xpos[self.planner.tcp_id_1])
         cost_dist_s = np.abs(distance - 0.30)
 
         cost_z_s = np.abs(self.data.site_xpos[self.planner.tcp_id_0][2] - self.data.site_xpos[self.planner.tcp_id_1][2])
 
-        cost_r_s = np.mean([quaternion_distance(self.data.xquat[self.planner.hande_id_0], self.data.xquat[self.model.body(name="target_0").id]),
-                           quaternion_distance(self.data.xquat[self.planner.hande_id_1], self.data.xquat[self.model.body(name="target_1").id])])
-        cost_g_s = np.mean([np.linalg.norm(self.data.site_xpos[self.planner.tcp_id_0] - self.data.xpos[self.model.body(name="target_0").id]),
-                           np.linalg.norm(self.data.site_xpos[self.planner.tcp_id_1] - self.data.xpos[self.model.body(name="target_1").id])])
+        cost_r_s = np.mean([quaternion_distance(self.data.xquat[self.planner.hande_id_0],
+                                                self.data.xquat[self.model.body(name="target_0").id]),
+                            quaternion_distance(self.data.xquat[self.planner.hande_id_1],
+                                                self.data.xquat[self.model.body(name="target_1").id])])
+        cost_g_s = np.mean([np.linalg.norm(
+            self.data.site_xpos[self.planner.tcp_id_0] - self.data.xpos[self.model.body(name="target_0").id]),
+            np.linalg.norm(self.data.site_xpos[self.planner.tcp_id_1] - self.data.xpos[
+                self.model.body(name="target_1").id])])
 
-        if self.task=='pick':
+        target_reached = False
+        if self.task == 'pick':
             target_reached = (
                     current_cost_g_0 < self.grab_pos_thresh \
                     and current_cost_r_0 < self.grab_rot_thresh \
                     and current_cost_g_1 < self.grab_pos_thresh \
                     and current_cost_r_1 < self.grab_rot_thresh
             )
-        elif self.task=='move':
+        elif self.task == 'move':
             target_reached = (
                     current_cost_g_tray < self.grab_pos_thresh \
                     and current_cost_r_tray < self.grab_rot_thresh \
-            )
+                )
 
-        if target_reached and self.task=='pick':
+        if target_reached and self.task == 'pick':
             self.task = 'move'
-            self.gripper_control(gripper_idx=0, action='close')
-            self.gripper_control(gripper_idx=1, action='close')
-        elif target_reached and self.task=='move':
+            self.gripper_control(gripper_act_idx=self.gripper_0_act_idx, action=0)
+            self.gripper_control(gripper_act_idx=self.gripper_1_act_idx, action=0)
+        elif target_reached and self.task == 'move':
             print("================== TARGRT REACHED UPDATING TARGET ==================", flush=True)
             self.success = 1
             self.reason = 'na'
             self.reset_simulation()
 
-        if self.task=='move' and cost_dist_s > 0.1:
+        if self.task == 'move' and cost_dist_s > 0.1:
             print("================== FAILED: DISTANCE ==================", flush=True)
             self.success = 0
             self.reason = 'dist'
             self.reset_simulation()
-        if self.task=='move' and cost_z_s > 0.05:
+        if self.task == 'move' and cost_z_s > 0.05:
             print("================== FAILED: Z ==================", flush=True)
             self.success = 0
             self.reason = 'z'
             self.reset_simulation()
 
-        if self.task=='move' and cost_r_s > 0.2:
+        if self.task == 'move' and cost_r_s > 0.2:
             print("================== FAILED: Z ==================", flush=True)
             self.success = 0
             self.reason = 'rotation'
@@ -416,10 +382,9 @@ class Planner(Node):
             self.reason = 'timeout'
             self.reset_simulation()
 
-
-        if self.record_data_ and self.target_idx<self.num_targets:    
+        if self.record_data_ and self.target_idx < self.num_targets:
             theta = self.data.qpos[self.joint_mask_pos]
-            step_time_ms = (time.time() - start_time)*1000
+            step_time_ms = (time.time() - start_time) * 1000
 
             self.data_buffers['step_time_ms'][self.target_idx].append(step_time_ms)
             self.data_buffers['theta'][self.target_idx].append(theta.copy())
@@ -430,32 +395,32 @@ class Planner(Node):
             self.data_buffers['cost_obj_to_targ'][self.target_idx].append(current_cost_g_tray.copy())
             self.data_buffers['cost_dist'][self.target_idx].append(cost_dist_s.copy())
             self.data_buffers['cost_zy'][self.target_idx].append(cost_z_s.copy())
-        
+
         # Update viewer
         self.viewer.sync()
-        
+
         # Print debug info
         print(f'\n| Target idx: {self.target_idx} '
               f'\n| Task: {self.task} '
-              f'\n| Total Time: {"%.0f"%(time.time() - self.traj_time_start)}ms '
-              f'\n| Step Time: {"%.0f"%((time.time() - start_time)*1000)}ms '
-              f'\n| Cost dist: {"%.2f, %.2f"%(float(cost_dist), float(cost_dist_s))} '
-              f'\n| Cost z: {"%.2f"%(float(cost_z_s))} '
-              f'\n| Cost r: {"%.2f"%(float(cost_r_s))} '
-              f'\n| Cost g mjx: {"%.2f"%(float(cost_g))} '
-              f'\n| Cost r mjx: {"%.2f"%(float(cost_r))} '
-              f'\n| Cost c: {"%.2f"%(float(cost_c))} '
-              f'\n| Cost gr0: {"%.2f, %.2f"%(float(current_cost_g_0), float(current_cost_r_0))} '
-              f'\n| Cost gr1: {"%.2f, %.2f"%(float(current_cost_g_1), float(current_cost_r_1))} '
-              f'\n| Cost tr: {"%.2f, %.2f"%(float(current_cost_g_tray), float(current_cost_r_tray))} '
+              f'\n| Total Time: {"%.0f" % (time.time() - self.traj_time_start)}ms '
+              f'\n| Step Time: {"%.0f" % ((time.time() - start_time) * 1000)}ms '
+              f'\n| Cost dist: {"%.2f, %.2f" % (float(cost_dist), float(cost_dist_s))} '
+              f'\n| Cost z: {"%.2f" % (float(cost_z_s))} '
+              f'\n| Cost r: {"%.2f" % (float(cost_r_s))} '
+              f'\n| Cost g mjx: {"%.2f" % (float(cost_g))} '
+              f'\n| Cost r mjx: {"%.2f" % (float(cost_r))} '
+              f'\n| Cost c: {"%.2f" % (float(cost_c))} '
+              f'\n| Cost gr0: {"%.2f, %.2f" % (float(current_cost_g_0), float(current_cost_r_0))} '
+              f'\n| Cost gr1: {"%.2f, %.2f" % (float(current_cost_g_1), float(current_cost_r_1))} '
+              f'\n| Cost tr: {"%.2f, %.2f" % (float(current_cost_g_tray), float(current_cost_r_tray))} '
               f'\n| Cost: {np.round(cost, 2)} ', flush=True)
-        
+
         time_until_next_step = self.model.opt.timestep - (time.time() - start_time)
         if time_until_next_step > 0:
-            time.sleep(time_until_next_step) 
+            time.sleep(time_until_next_step)
 
     def reset_simulation(self):
-        if self.target_idx<self.num_targets:
+        if self.record_data_ and self.target_idx < self.num_targets:
             self.data_buffers['success'][self.target_idx] = self.success
             self.data_buffers['reason'][self.target_idx] = self.reason
             self.data_buffers['total_time_s'][self.target_idx] = (time.time() - self.traj_time_start)
@@ -466,8 +431,8 @@ class Planner(Node):
         self.traj_time_start = time.time()
         self.target_idx += 1
 
-        self.task='pick'
-        self.planner.xi_cov = np.kron(np.eye(self.planner.cem.num_dof), 10*np.identity(self.planner.cem.nvar_single)) 
+        self.task = 'pick'
+        self.planner.xi_cov = np.kron(np.eye(self.planner.cem.num_dof), 10 * np.identity(self.planner.cem.nvar_single))
         self.planner.xi_mean = np.zeros(self.planner.cem.nvar)
         self.data.qpos[self.joint_mask_pos] = self.init_joint_position
         self.data.qvel[self.joint_mask_vel] = np.zeros(self.init_joint_position.shape)
@@ -478,10 +443,12 @@ class Planner(Node):
         self.data.mocap_pos[self.model.body_mocapid[self.model.body(name='tray_mocap_target').id]] = target_pos
         self.data.mocap_quat[self.model.body_mocapid[self.model.body(name='tray_mocap_target').id]] = target_rot
 
-        mujoco.mj_step(self.model, self.data)
+        mj.mj_step(self.model, self.data)
 
-        self.planner.target_0 = np.concatenate([self.data.xpos[self.model.body(name="target_0").id], self.data.xquat[self.model.body(name="target_0").id]])
-        self.planner.target_1 = np.concatenate([self.data.xpos[self.model.body(name="target_1").id], self.data.xquat[self.model.body(name="target_1").id]])
+        self.planner.target_0 = np.concatenate(
+            [self.data.xpos[self.model.body(name="target_0").id], self.data.xquat[self.model.body(name="target_0").id]])
+        self.planner.target_1 = np.concatenate(
+            [self.data.xpos[self.model.body(name="target_1").id], self.data.xquat[self.model.body(name="target_1").id]])
 
         self.planner.target_2[:3] = target_pos
         self.planner.target_2[3:] = target_rot
@@ -493,77 +460,31 @@ class Planner(Node):
         target_pos = area_center_1 + np.random.uniform(-area_size_1, area_size_1, size=3)
         target_rot = target_rotations[np.random.randint(0, 3)]
         return target_pos, target_rot
-                
-    def gripper_control(self, gripper_idx=0, action='open'):
-        if self.use_hardware:
-            self.req.position = 250 if action == 'close' else 0
-            self.req.speed = 255
-            self.req.force = 255
-            resp = self.grippers[str(gripper_idx)]['srv'].call_async(self.req)
 
-        self.grippers[str(gripper_idx)]['state'] = action
-        
-        print(f"Gripper {gripper_idx} has complited {action} action.")
+    def gripper_control(self, gripper_act_idx, action=255):
+        self.grippers[str(gripper_act_idx)]['state'] = action
+        self.data.ctrl[gripper_act_idx] = action
+        print(f"Gripper {gripper_act_idx} has complited {action} action.")
 
     def move_to_start(self):
         """Move robot to initial joint position"""
-        self.rtde_c_1.moveJ(self.init_joint_position[self.num_dof//2:], asynchronous=False)
-        self.rtde_c_0.moveJ(self.init_joint_position[:self.num_dof//2], asynchronous=False)
-        self.gripper_control(gripper_idx=0, action='open') 
-        self.gripper_control(gripper_idx=1, action='open') 
+        self.gripper_control(gripper_act_idx=self.gripper_0_act_idx, action=255)
+        self.gripper_control(gripper_act_idx=self.gripper_1_act_idx, action=255)
         print("Moved to initial pose.", flush=True)
-
-    def initialize_robot_connection(self):
-        try:
-            from gripper_srv.srv import GripperService
-
-            self.rtde_c_0 = RTDEControl("192.168.0.120")
-            self.rtde_r_0 = RTDEReceive("192.168.0.120")
-
-            self.rtde_c_1 = RTDEControl("192.168.0.124")
-            self.rtde_r_1 = RTDEReceive("192.168.0.124")
-
-            self.grippers['0']['srv'] = self.create_client(GripperService, 'gripper_0/gripper_service')
-            while not self.grippers['0']['srv'].wait_for_service(timeout_sec=1.0):
-                self.get_logger().info('Gripper 0 service not available, waiting again...')
-
-            self.grippers['1']['srv'] = self.create_client(GripperService, 'gripper_1/gripper_service')
-            while not self.grippers['1']['srv'].wait_for_service(timeout_sec=1.0):
-                self.get_logger().info('Gripper 1 service not available, waiting again...')
-
-            self.req = GripperService.Request()
-            print("Connection with UR5e established.", flush=True)
-        except Exception as e:
-            print(f"Could not connect to robot: {e}", flush=True)
-            rclpy.shutdown()
-            return
-
-        # Move to initial position
-        self.move_to_start()
-
-    def close_connection(self):
-        if self.use_hardware:
-            """Cleanup robot connection"""
-            if self.rtde_c_0:
-                self.rtde_c_0.speedStop()
-                self.rtde_c_0.disconnect()
-
-            if self.rtde_c_1:
-                self.rtde_c_1.speedStop()
-                self.rtde_c_1.disconnect()
-            print("Disconnected from UR5e Robot", flush=True)
 
     def object0_callback(self, msg):
         """Callback for target object pose updates"""
 
         if self.task == 'pick':
             pose = msg.pose
-            tray_pos = np.array([-pose.position.x, -pose.position.y, pose.position.z-0.08])
+            tray_pos = np.array([-pose.position.x, -pose.position.y, pose.position.z - 0.08])
             self.model.body(name='tray').pos = tray_pos
             self.data.mocap_pos[self.model.body_mocapid[self.model.body(name='tray_mocap').id]] = tray_pos
-            mujoco.mj_forward(self.model, self.data)
-            self.planner.update_targets(target_idx=0, target_pos=self.data.xpos[self.model.body(name="target_0").id], target_rot = self.model.body(name='target_0').quat)
-            self.planner.update_targets(target_idx=1, target_pos=self.data.xpos[self.model.body(name="target_1").id], target_rot = self.model.body(name='target_1').quat)
+            mj.mj_forward(self.model, self.data)
+            self.planner.update_targets(target_idx=0, target_pos=self.data.xpos[self.model.body(name="target_0").id],
+                                        target_rot=self.model.body(name='target_0').quat)
+            self.planner.update_targets(target_idx=1, target_pos=self.data.xpos[self.model.body(name="target_1").id],
+                                        target_rot=self.model.body(name='target_1').quat)
 
     def obstacle0_callback(self, msg):
         """Callback for obstacle pose updates"""
@@ -613,22 +534,21 @@ class Planner(Node):
         self.data_saved = True
         print("Saving data...")
 
+
 def main(args=None):
-    rclpy.init(args=args)
     planner = Planner()
     print("Initialized node.", flush=True)
-    
+
     try:
-        rclpy.spin(planner)
+        while planner.viewer.is_running():
+            planner.control_loop()
     except KeyboardInterrupt:
         print("Shutting down...", flush=True)
     finally:
-        # if rclpy.ok():
+        planner.viewer.close()
         if planner.record_data_:
             planner.record_data()
-        planner.close_connection()
-        planner.destroy_node()
-        rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()

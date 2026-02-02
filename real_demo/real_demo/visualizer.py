@@ -1,42 +1,24 @@
-import rclpy
-from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy
-from ament_index_python.packages import get_package_share_directory
-
 import os
-import json
-import csv
 import time
 
 import mujoco
 from mujoco import viewer
-import numpy as np
 
-from sampling_based_planner.quat_math import *
+from ..sampling_based_planner.quat_math import *
 
-from rtde_control import RTDEControlInterface as RTDEControl
-from rtde_receive import RTDEReceiveInterface as RTDEReceive
-
-PACKAGE_DIR = get_package_share_directory('real_demo')
+PACKAGE_DIR = 'real_demo'
 np.set_printoptions(precision=4, suppress=True)
 
 
-class Visualizer(Node):
+class Visualizer():
     def __init__(self):
         super().__init__('visualizer')
 
-        self.declare_parameter('use_hardware', False)
-        self.declare_parameter('record_data', False)
-        self.declare_parameter('playback', True)
-        self.declare_parameter('folder', "manual") # manual or planner
-        self.declare_parameter('idx', 0)
-
-        self.use_hardware = self.get_parameter('use_hardware').get_parameter_value().bool_value
-        self.record_data_ = self.get_parameter('record_data').get_parameter_value().bool_value
-        self.playback = self.get_parameter('playback').get_parameter_value().bool_value
-        self.folder = self.get_parameter('folder').get_parameter_value().string_value
-        self.idx = self.get_parameter('idx').get_parameter_value().integer_value
+        self.use_hardware = False
+        self.record_data_ = False
+        self.playback = False
+        self.folder = "./out"
+        self.idx = 0
         self.idx = str(self.idx).zfill(3)
 
         self.init_joint_position = np.array([1.5, -1.8, 1.75, -1.25, -1.6, 0, -1.5, -1.8, 1.75, -1.25, -1.6, 0])
@@ -47,10 +29,10 @@ class Visualizer(Node):
         model_path = os.path.join(PACKAGE_DIR, 'ur5e_hande_mjx', 'scene.xml')
 
         self.pathes = {
-                "setup": os.path.join(PACKAGE_DIR, 'data', self.folder, 'setup', f'setup_{self.idx}.npz'),
-                "trajectory": os.path.join(PACKAGE_DIR, 'data', self.folder, 'trajectory', f'traj_{self.idx}.npz'),
-            }
-        
+            "setup": os.path.join(PACKAGE_DIR, 'data', self.folder, 'setup', f'setup_{self.idx}.npz'),
+            "trajectory": os.path.join(PACKAGE_DIR, 'data', self.folder, 'trajectory', f'traj_{self.idx}.npz'),
+        }
+
         self.data_saved = False
 
         if self.record_data_:
@@ -75,7 +57,6 @@ class Visualizer(Node):
             for key, value in self.pathes.items():
                 self.data_files[key] = np.load(self.pathes[key], allow_pickle=True)
 
-
         self.model = mujoco.MjModel.from_xml_path(model_path)
         self.model.opt.timestep = 0.1
 
@@ -85,25 +66,32 @@ class Visualizer(Node):
             joint_type = self.model.jnt_type[i]
             n_pos = 7 if joint_type == mujoco.mjtJoint.mjJNT_FREE else 4 if joint_type == mujoco.mjtJoint.mjJNT_BALL else 1
             n_vel = 6 if joint_type == mujoco.mjtJoint.mjJNT_FREE else 3 if joint_type == mujoco.mjtJoint.mjJNT_BALL else 1
-            
+
             for _ in range(n_pos):
                 joint_names_pos.append(mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, i))
             for _ in range(n_vel):
                 joint_names_vel.append(mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, i))
-        
-        
-        robot_joints = np.array(['shoulder_pan_joint_1', 'shoulder_lift_joint_1', 'elbow_joint_1', 'wrist_1_joint_1', 'wrist_2_joint_1', 'wrist_3_joint_1',
-                        'shoulder_pan_joint_2', 'shoulder_lift_joint_2', 'elbow_joint_2', 'wrist_1_joint_2', 'wrist_2_joint_2', 'wrist_3_joint_2'])
-        
+
+        robot_joints = np.array(
+            ['shoulder_pan_joint_1', 'shoulder_lift_joint_1', 'elbow_joint_1', 'wrist_1_joint_1', 'wrist_2_joint_1',
+             'wrist_3_joint_1',
+             'shoulder_pan_joint_2', 'shoulder_lift_joint_2', 'elbow_joint_2', 'wrist_1_joint_2', 'wrist_2_joint_2',
+             'wrist_3_joint_2'])
+
         self.joint_mask_pos = np.isin(joint_names_pos, robot_joints)
         self.joint_mask_vel = np.isin(joint_names_vel, robot_joints)
 
-
         self.data = mujoco.MjData(self.model)
 
-        target_0_rot = quaternion_multiply(quaternion_multiply(self.model.body(name="target_0").quat, rotation_quaternion(-180, [0, 1, 0])), rotation_quaternion(-90, [0, 0, 1]))
-        target_1_rot = quaternion_multiply(quaternion_multiply(self.model.body(name="target_1").quat, rotation_quaternion(180, [0, 1, 0])), rotation_quaternion(90, [0, 0, 1]))
-        target_2_rot = quaternion_multiply(self.data.mocap_quat[self.model.body_mocapid[self.model.body(name='tray_mocap_target').id]], rotation_quaternion(-45, [0, 0, 1]))
+        target_0_rot = quaternion_multiply(
+            quaternion_multiply(self.model.body(name="target_0").quat, rotation_quaternion(-180, [0, 1, 0])),
+            rotation_quaternion(-90, [0, 0, 1]))
+        target_1_rot = quaternion_multiply(
+            quaternion_multiply(self.model.body(name="target_1").quat, rotation_quaternion(180, [0, 1, 0])),
+            rotation_quaternion(90, [0, 0, 1]))
+        target_2_rot = quaternion_multiply(
+            self.data.mocap_quat[self.model.body_mocapid[self.model.body(name='tray_mocap_target').id]],
+            rotation_quaternion(-45, [0, 0, 1]))
 
         self.model.body(name='target_0').quat = target_0_rot
         self.model.body(name='target_1').quat = target_1_rot
@@ -115,57 +103,18 @@ class Visualizer(Node):
 
         self.data.qpos[self.joint_mask_pos] = self.init_joint_position
         self.init_tray_pos = self.data.mocap_pos[self.model.body_mocapid[self.model.body(name='tray_mocap').id]].copy()
-        self.init_tray_quat = self.data.mocap_quat[self.model.body_mocapid[self.model.body(name='tray_mocap').id]].copy()
+        self.init_tray_quat = self.data.mocap_quat[
+            self.model.body_mocapid[self.model.body(name='tray_mocap').id]].copy()
 
         self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
         self.viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = True
         if self.use_hardware:
-            self.viewer.cam.lookat[:] = [-3.0, 0.0, 0.8]     
+            self.viewer.cam.lookat[:] = [-3.0, 0.0, 0.8]
         else:
-            self.viewer.cam.lookat[:] = [-0.0, 0.0, 0.8] #[0.0, 0.0, 0.8]  
-        self.viewer.cam.distance = 5.0 
-        self.viewer.cam.azimuth = 90.0 
-        self.viewer.cam.elevation = -30.0 
-
-        if not self.playback:
-
-            if self.use_hardware:
-                self.rtde_c_0 = RTDEControl("192.168.0.120")
-                self.rtde_r_0 = RTDEReceive("192.168.0.120")
-
-                self.rtde_c_1 = RTDEControl("192.168.0.124")
-                self.rtde_r_1 = RTDEReceive("192.168.0.124")
-                self.move_to_start()
-
-            qos_profile = QoSProfile(reliability=QoSReliabilityPolicy.BEST_EFFORT, depth=1)
-            self.subscription_table1 = self.create_subscription(PoseStamped,'/vrpn_mocap/table1/pose',self.table0_callback,qos_profile )
-            self.subscription_table2 = self.create_subscription(PoseStamped,'/vrpn_mocap/table2/pose',self.table1_callback,qos_profile )
-            self.subscription_object1 = self.create_subscription(PoseStamped,'/vrpn_mocap/object1/pose',self.object0_callback,qos_profile )
-            self.subscription_object2 = self.create_subscription(PoseStamped,'/vrpn_mocap/object2/pose',self.object1_callback,qos_profile )
-
-            self.timer = self.create_timer(self.model.opt.timestep, self.view_model)
-        else:
-            self.tcp_id_0 = self.model.site(name="tcp_0").id
-            self.hande_id_0 = self.model.body(name="hande_0").id
-            self.tcp_id_1 = self.model.site(name="tcp_1").id
-            self.hande_id_1 = self.model.body(name="hande_1").id
-
-            self.model.body(name='table_0').pos = self.data_files['setup']['setup'][0][0]
-            self.model.body(name='table0_marker').pos = self.data_files['setup']['setup'][0][1]
-            self.model.body(name='table_1').pos = self.data_files['setup']['setup'][0][2]
-            self.model.body(name='table1_marker').pos = self.data_files['setup']['setup'][0][3]
-
-            self.viewer.cam.lookat[:] = self.model.body(name='table_0').pos
-
-            self.labels = ['theta', 'thetadot', 'theta_planned', 'thetadot_planned', 'target_0', 'target_1', 'theta_planned_batched', 'thetadot_planned_batched', 'cost_cgr_batched', 'timestamp']
-
-            for i in self.labels:
-                print(f'{i}: {self.data_files['trajectory'][i].shape}', flush=True)
-
-            self.data.qpos[self.joint_mask_pos] = self.data_files['trajectory']['theta'][10]
-
-            self.step_idx = 0
-            self.timer = self.create_timer(self.model.opt.timestep, self.view_playback)
+            self.viewer.cam.lookat[:] = [-0.0, 0.0, 0.8]  # [0.0, 0.0, 0.8]
+        self.viewer.cam.distance = 5.0
+        self.viewer.cam.azimuth = 90.0
+        self.viewer.cam.elevation = -30.0
 
     def move_to_start(self):
         """Move robot to initial joint position"""
@@ -202,7 +151,7 @@ class Visualizer(Node):
             self.model.body(name='target_1').quat
         ])
 
-        if self.record_data_:    
+        if self.record_data_:
             self.data_buffers['theta'].append(theta.copy())
             self.data_buffers['thetadot'].append(thetadot.copy())
             self.data_buffers['target_0'].append(target_0.copy())
@@ -211,7 +160,7 @@ class Visualizer(Node):
 
         time_until_next_step = self.model.opt.timestep - (time.time() - step_start)
         if time_until_next_step > 0:
-            time.sleep(time_until_next_step)   
+            time.sleep(time_until_next_step)
 
     def view_playback(self):
         step_start = time.time()
@@ -229,7 +178,7 @@ class Visualizer(Node):
             eef_pos_0 = self.data.site_xpos[self.tcp_id_0]
             eef_pos_1 = self.data.site_xpos[self.tcp_id_1]
 
-            tray_pos = (eef_pos_0+eef_pos_1)/2 - np.array([0, 0, 0.1])
+            tray_pos = (eef_pos_0 + eef_pos_1) / 2 - np.array([0, 0, 0.1])
             self.data.mocap_pos[self.model.body_mocapid[self.model.body(name='tray_mocap').id]] = tray_pos
 
             tray_rot_init = self.data.mocap_quat[self.model.body_mocapid[self.model.body(name='tray_mocap').id]]
@@ -243,7 +192,7 @@ class Visualizer(Node):
         mujoco.mj_step(self.model, self.data)
         self.viewer.sync()
 
-        if self.step_idx < len(self.data_files['trajectory']['theta'])-1:
+        if self.step_idx < len(self.data_files['trajectory']['theta']) - 1:
             self.step_idx += 1
         else:
             self.step_idx = 0
@@ -256,35 +205,35 @@ class Visualizer(Node):
 
         time_until_next_step = self.model.opt.timestep - (time.time() - step_start)
         if time_until_next_step > 0:
-            time.sleep(time_until_next_step) 
+            time.sleep(time_until_next_step)
 
     def table0_callback(self, msg):
-        marker_pose =  [-msg.pose.position.x, -msg.pose.position.y, msg.pose.position.z]
-        marker_diff = marker_pose-self.model.body(name='table0_marker').pos
+        marker_pose = [-msg.pose.position.x, -msg.pose.position.y, msg.pose.position.z]
+        marker_diff = marker_pose - self.model.body(name='table0_marker').pos
         table0_pose = self.model.body(name='table_0').pos + marker_diff
         self.model.body(name='table_0').pos = table0_pose
         self.model.body(name='table0_marker').pos = marker_pose
         self.viewer.cam.lookat[:] = self.model.body(name='table_0').pos
 
     def table1_callback(self, msg):
-        marker_pose =  [-msg.pose.position.x, -msg.pose.position.y, msg.pose.position.z]
-        marker_diff = marker_pose-self.model.body(name='table1_marker').pos
+        marker_pose = [-msg.pose.position.x, -msg.pose.position.y, msg.pose.position.z]
+        marker_diff = marker_pose - self.model.body(name='table1_marker').pos
         table1_pose = self.model.body(name='table_1').pos + marker_diff
         self.model.body(name='table_1').pos = table1_pose
         self.model.body(name='table1_marker').pos = marker_pose
 
     def object0_callback(self, msg):
         pose = msg.pose
-        tray_pos = np.array([-pose.position.x, -pose.position.y, pose.position.z-0.07])
+        tray_pos = np.array([-pose.position.x, -pose.position.y, pose.position.z - 0.07])
         self.model.body(name='tray').pos = tray_pos
         self.data.mocap_pos[self.model.body_mocapid[self.model.body(name='tray_mocap').id]] = tray_pos
 
     def object1_callback(self, msg):
-        marker_pose =  [-msg.pose.position.x, -msg.pose.position.y, msg.pose.position.z]
+        marker_pose = [-msg.pose.position.x, -msg.pose.position.y, msg.pose.position.z]
         self.model.body(name='target_1').pos = marker_pose
 
     def close_connection(self):
-        if self.playback==False and self.use_hardware==True:
+        if self.playback == False and self.use_hardware == True:
             self.rtde_c_0.speedStop()
             self.rtde_c_0.disconnect()
             self.rtde_c_1.speedStop()
@@ -293,8 +242,9 @@ class Visualizer(Node):
 
     def record_data(self):
         """Save data to npy file"""
-        self.data_buffers['setup'].append([self.model.body(name='table_0').pos, self.model.body(name='table0_marker').pos, 
-                                           self.model.body(name='table_1').pos, self.model.body(name='table1_marker').pos])
+        self.data_buffers['setup'].append(
+            [self.model.body(name='table_0').pos, self.model.body(name='table0_marker').pos,
+             self.model.body(name='table_1').pos, self.model.body(name='table1_marker').pos])
         np.savez(
             self.pathes['setup'],
             setup=self.data_buffers['setup'],
@@ -314,8 +264,6 @@ class Visualizer(Node):
         )
         self.data_saved = True
         print("Saving data...")
-
-
 
 
 def main(args=None):
